@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Singularity Outpost: Smooth P2P Netcode</title>
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;user-select:none}
+  body{overflow:hidden;background:#020308;color:#e2e8f0;font-family:monospace}
+  canvas{display:block}
+  
+  #menu-overlay{position:fixed;inset:0;background:rgba(2,3,8,.95);display:flex;justify-content:center;align-items:center;z-index:100}
+  .menu-card{background:#090d16;border:2px solid #38bdf8;border-radius:12px;padding:24px;width:380px;box-shadow:0 0 30px rgba(56,189,248,.3);text-align:center}
+  .menu-card h1{color:#38bdf8;font-size:18px;margin-bottom:16px;letter-spacing:1px}
+  .input-field{width:100%;padding:10px;background:#111827;border:1px solid #334155;border-radius:6px;color:#fff;font-family:monospace;margin-bottom:12px;outline:none}
+  .input-field:focus{border-color:#38bdf8}
+  .color-picker{display:flex;justify-content:space-between;align-items:center;margin:10px 0;font-size:12px;color:#94a3b8}
+  .color-picker input{background:none;border:none;width:32px;height:32px;cursor:pointer}
+  
+  #hud{position:fixed;top:8px;left:8px;background:rgba(5,10,20,.92);padding:10px 14px;border:1px solid #38bdf8;border-radius:6px;font-size:11px;z-index:5;box-shadow:0 0 15px rgba(56,189,248,.2)}
+  #ui{position:fixed;bottom:8px;left:8px;background:rgba(5,10,20,.92);padding:10px 14px;border:1px solid #334155;border-radius:6px;font-size:10px;color:#94a3b8;line-height:1.6;z-index:5}
+  #map{position:fixed;bottom:8px;right:8px;border:1px solid #38bdf8;background:#020614;z-index:5}
+  
+  #os{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:460px;background:#090d16;border:2px solid #38bdf8;border-radius:8px;padding:16px;z-index:10;box-shadow:0 0 25px rgba(56,189,248,.3)}
+  .file{background:#111827;border:1px solid #1e293b;padding:8px;margin:6px 0;border-radius:4px;display:flex;justify-content:space-between;align-items:center;font-size:11px}
+  
+  .btn{background:#0284c7;color:#fff;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;font-family:monospace;font-weight:bold;width:100%;margin-top:8px;transition:0.2s}
+  .btn:hover{background:#0369a1}
+  .bar{width:100%;height:8px;background:#1e293b;margin-top:6px;border-radius:4px;overflow:hidden}
+  .fill{height:100%;background:#10b981;width:0%}
+  .pvp-badge{display:inline-block;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:10px;margin-left:6px}
+  .pvp-on{background:#ef4444;color:#fff}
+  .pvp-off{background:#10b981;color:#fff}
+</style>
+</head>
+<body>
+
+<div id="menu-overlay">
+  <div class="menu-card">
+    <h1>SINGULARITY OUTPOST (SMOOTH P2P)</h1>
+    <input type="text" id="player-name" class="input-field" placeholder="Commander Name" value="Explorer_1">
+    <input type="text" id="room-code" class="input-field" placeholder="Room Code" value="POLARIS-OUTPOST">
+    
+    <div class="color-picker">
+      <span>Suit Color:</span>
+      <input type="color" id="suit-color" value="#38bdf8">
+    </div>
+    <div class="color-picker">
+      <span>Visor Glow:</span>
+      <input type="color" id="visor-color" value="#00ffcc">
+    </div>
+
+    <button class="btn" id="start-btn">LAUNCH GAME</button>
+  </div>
+</div>
+
+<div id="hud">Initialising P2P...</div>
+
+<div id="ui">
+  <strong>[A/D]</strong> Walk &bull; <strong>[W]</strong> Jet/Thrust &bull; <strong>[SPACE]</strong> Mine &bull; <strong>[P]</strong> Toggle PvP<br>
+  <strong>[1]</strong> Solar($80) <strong>[2]</strong> Sci Lab($150) <strong>[3]</strong> Antenna($120) <strong>[4]</strong> Shipyard($500) <strong>[5]</strong> PC($140) <strong>[6]</strong> Teleporter($220)<br>
+  <strong>[7]</strong> Floor Slab($40) <strong>[8]</strong> Wall Pillar($50) <strong>[9]</strong> Relay Server($350) <strong>[0]</strong> Outpost HQ($800)<br>
+  <strong>[CLICK]</strong> Build / Target &bull; <strong>[C]</strong> Wire &bull; <strong>[V]</strong> Toggle Beams &bull; <strong>[R]</strong> Orbital Ring ($2,500 + HQ) &bull; <strong>[K]</strong> Export Game
+</div>
+
+<div id="os">
+  <div style="color:#38bdf8;display:flex;justify-content:space-between;margin-bottom:8px">
+    <strong>OUTPOST OS // NETWORK & DATA CENTER</strong>
+    <span style="cursor:pointer;color:#ef4444;font-weight:bold" id="close-os-btn">[X]</span>
+  </div>
+  <div id="os-stat" style="font-size:11px;color:#94a3b8;margin-bottom:8px"></div>
+  <div id="os-files"></div>
+  <div class="bar"><div class="fill" id="tx-bar"></div></div>
+  <div id="tx-txt" style="font-size:11px;color:#10b981;margin-top:6px">IDLE</div>
+</div>
+
+<canvas id="c"></canvas>
+<canvas id="map" width="240" height="120"></canvas>
+
+<script>
+let peer = null;
+let myPeerId = null;
+let hostConn = null;
+const peers = {}; 
+const remotePlayers = {};
+let isHost = false;
+
+let playerName = "Explorer_1";
+let currentRoomId = "POLARIS-OUTPOST";
+let suitColor = "#38bdf8";
+let visorColor = "#00ffcc";
+
+const c=document.getElementById('c'),x=c.getContext('2d'),mc=document.getElementById('map'),mx=mc.getContext('2d'),hud=document.getElementById('hud');
+let W=c.width=innerWidth,H=c.height=innerHeight;
+onresize=()=>{W=c.width=innerWidth;H=c.height=innerHeight};
+
+const keys={},mods=[],wires=[],crys=[];
+let money=1500,parts=4,research=0,timer=600,last=performance.now(),bh=0;
+let ghost=null,wFrom=null,activePC=null,txJob=null;
+let pvpEnabled=false, showBeams=true, mouseWorldX=0, mouseWorldY=0;
+let ringTerraformed=false, hasHQ=false;
+
+const FILES=[
+  {id:'mine',name:'auto_harvest.exe',size:120,desc:'Automated Drones (+ $50/s for 45s)'},
+  {id:'over',name:'quantum_overclock.sys',size:200,desc:'2x Tech Lab Money & Research (45s)'},
+  {id:'scan',name:'orbital_scan.dat',size:160,desc:'Instant +$450 Telemetry Bounty'},
+  {id:'flux',name:'array_booster.bin',size:260,desc:'Expands Antenna Relay Signal Ranges +50%'}
+];
+
+const stars=Array.from({length:320},()=>({x:Math.random()*4e3,y:Math.random()*4e3,s:Math.random()*2+.5,v:12+Math.random()*24}));
+const B={planet:{n:'PRIME',y:0,g:520,c:'#0f172a',l:'#38bdf8'},moon:{n:'MOON',y:-3600,g:190,c:'#1e293b',l:'#cbd5e1'}};
+const sY=(px,b)=>B[b].y+Math.sin(px*.0014)*24+Math.cos(px*.0045)*8;
+
+const addC=(sx,w,b)=>{for(let i=0;i<16;i++)crys.push({x:sx+(Math.random()-.5)*w,b,hp:40,v:b=='moon'?140:65})};
+addC(0,8000,'planet');addC(0,7000,'moon');
+
+const pl={x:0,y:sY(0,'planet')-18,vx:0,vy:0,jet:100,dir:1,inShip:false,b:'planet',animTimer:0};
+const rk={built:false,x:0,y:0,vx:0,vy:0,a:-Math.PI/2,fuel:100};
+
+const bAt=y=>y<-1800?'moon':'planet';
+
+function closeOS(){activePC=null;document.getElementById('os').style.display='none'}
+document.getElementById('close-os-btn').onclick = closeOS;
+
+document.getElementById('start-btn').onclick = () => {
+  playerName = document.getElementById('player-name').value || 'Explorer_1';
+  currentRoomId = (document.getElementById('room-code').value || 'POLARIS-OUTPOST').toLowerCase().replace(/[^a-z0-9]/g, '-');
+  suitColor = document.getElementById('suit-color').value;
+  visorColor = document.getElementById('visor-color').value;
+  document.getElementById('menu-overlay').style.display = 'none';
+  initP2P();
+};
+
+c.onmousemove=e=>{
+  mouseWorldX = e.clientX - W/2 + pl.x;
+  mouseWorldY = e.clientY - H*.65 + pl.y;
+};
+
+c.onmousedown=e=>{
+  if(e.button===2){ghost=wFrom=null;return;}
+  if(ghost){
+    let b=bAt(pl.y);
+    if(money>=ghost.c){
+      money-=ghost.c;
+      if(ghost.t=='hq') hasHQ=true;
+      if(ghost.t=='pad'){
+        parts-=5;
+        Object.assign(rk,{built:true,x:mouseWorldX,y:sY(mouseWorldX,b)-42,vx:0,vy:0,a:-Math.PI/2,fuel:100});
+      }
+      const newMod = {id: 'mod_'+Date.now()+'_'+Math.random().toString(36).substring(2,6), x:mouseWorldX, yOff:ghost.t=='floor'?-35:(ghost.t=='wall'?-60:0), b, t:ghost.t, lv:1, r:ghost.t=='ant'?2800:0, act:false, p:0};
+      mods.push(newMod);
+      broadcastP2P({type:'build_mod', mod:newMod});
+      ghost=null;
+    }
+  } else if(wFrom){
+    let b=bAt(pl.y);
+    let target=mods.find(m=>m.b==b&&(m.t=='lab'||m.t=='pc'||m.t=='server')&&Math.abs(m.x-mouseWorldX)<50);
+    if(target&&!wires.some(w=>w.a.id==wFrom.id&&w.b.id==target.id)){
+      const newWire = {id: 'wire_'+Date.now(), aId:wFrom.id, bId:target.id, a:wFrom, b:target, p:0};
+      wires.push(newWire);
+      broadcastP2P({type:'build_wire', wire:{id:newWire.id, aId:newWire.aId, bId:newWire.bId}});
+      wFrom=null;
+    }
+  }
+};
+c.oncontextmenu=e=>e.preventDefault();
+
+onkeydown=e=>{
+  keys[e.code]=true;
+  if(e.code=='Escape'){ghost=wFrom=null;closeOS()}
+  if(e.code=='KeyP'){pvpEnabled=!pvpEnabled}
+  if(e.code=='KeyV'){showBeams=!showBeams}
+  if(e.code=='KeyK'){exportSaveFile()}
+  if(e.code=='KeyR'&&!ringTerraformed&&hasHQ&&money>=2500){
+    money-=2500;
+    ringTerraformed=true;
+    const t1 = {id:'t1', x:-800, yOff:0, b:'planet',t:'tele',lv:5,r:0,act:true};
+    const t2 = {id:'t2', x:800, yOff:0, b:'planet',t:'tele',lv:5,r:0,act:true};
+    mods.push(t1, t2);
+    broadcastP2P({type:'build_mod', mod:t1});
+    broadcastP2P({type:'build_mod', mod:t2});
+  }
+  if(activePC)return;
+  if(e.code=='Digit1')ghost={t:'solar',c:80};if(e.code=='Digit2')ghost={t:'lab',c:150};
+  if(e.code=='Digit3')ghost={t:'ant',c:120};if(e.code=='Digit4')ghost={t:'pad',c:500};
+  if(e.code=='Digit5')ghost={t:'pc',c:140};if(e.code=='Digit6')ghost={t:'tele',c:220};
+  if(e.code=='Digit7')ghost={t:'floor',c:40};if(e.code=='Digit8')ghost={t:'wall',c:50};
+  if(e.code=='Digit9')ghost={t:'server',c:350};if(e.code=='Digit0')ghost={t:'hq',c:800};
+  
+  if(e.code=='KeyC'){
+    let b=bAt(pl.y);
+    let solar=mods.find(m=>m.b==b&&m.t=='solar'&&Math.abs(m.x-pl.x)<60);
+    if(solar) wFrom=solar;
+  }
+  if(e.code=='KeyU'){
+    let m=mods.find(i=>i.b==bAt(pl.y)&&Math.abs(i.x-pl.x)<55);
+    if(m&&m.lv<10&&money>=m.lv*150){
+      money-=m.lv*150;m.lv++;if(m.t=='ant')m.r+=2200;
+      broadcastP2P({type:'upgrade_mod', id:m.id, lv:m.lv});
+    }
+  }
+  if(e.code=='KeyF'){
+    let m=mods.find(i=>i.b==bAt(pl.y)&&Math.abs(i.x-pl.x)<55);
+    if(m?.t=='pc'){activePC=m;document.getElementById('os').style.display='block'}
+    if(m?.t=='tele'){
+      let o=mods.filter(i=>i.t=='tele'&&i!=m);
+      if(o.length){let d=o[Math.floor(Math.random()*o.length)];pl.x=d.x;pl.y=sY(d.x,d.b)-22;pl.vx=pl.vy=0}
+    }
+  }
+};
+onkeyup=e=>keys[e.code]=false;
+
+function exportSaveFile(){
+  const saveData = {
+    version: "2.0",
+    money, research, parts, ringTerraformed, hasHQ,
+    modules: mods.map(m=>({id:m.id,x:m.x,yOff:m.yOff,b:m.b,t:m.t,lv:m.lv})),
+    wires: wires.map(w=>({id:w.id,aId:w.aId,bId:w.bId}))
+  };
+  const blob = new Blob([JSON.stringify(saveData, null, 2)], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `Outpost_Save_${currentRoomId}.json`;
+  a.click();
+}
+
+function initP2P() {
+  const hostRoomId = `outpost-host-${currentRoomId}`;
+  peer = new Peer(hostRoomId, {debug: 1});
+
+  peer.on('open', id => {
+    isHost = true;
+    myPeerId = id;
+    setupHostListeners();
+    hud.textContent = 'HOST ONLINE // WAITING FOR CREW';
+  });
+
+  peer.on('error', err => {
+    if (err.type === 'unavailable-id') {
+      isHost = false;
+      peer = new Peer({debug: 1});
+      peer.on('open', id => {
+        myPeerId = id;
+        connectToHost(hostRoomId);
+      });
+      peer.on('error', e => { hud.textContent = `P2P ERROR: ${e.type}`; });
+    } else {
+      hud.textContent = `P2P: ${err.type || 'CONNECTION ISSUE'}`;
+    }
+  });
+}
+
+function worldSnapshot() {
+  return {
+    type: 'world_state',
+    mods: mods.map(m => ({...m})),
+    wires: wires.map(w => ({id:w.id, aId:w.aId, bId:w.bId})),
+    ringTerraformed, hasHQ
+  };
+}
+
+function setupHostListeners() {
+  peer.on('connection', conn => {
+    peers[conn.peer] = conn;
+    conn.on('open', () => {
+      if (conn.open) conn.send(worldSnapshot());
+      hud.textContent = `HOST ONLINE // ${Object.keys(peers).length} CONNECTION(S)`;
+    });
+    conn.on('data', data => handleP2PData(data, conn.peer));
+    conn.on('close', () => {
+      delete peers[conn.peer];
+      delete remotePlayers[conn.peer];
+      broadcastP2P({type:'player_left', id:conn.peer});
+    });
+    conn.on('error', () => {
+      delete peers[conn.peer];
+      delete remotePlayers[conn.peer];
+    });
+  });
+}
+
+function connectToHost(hostId) {
+  if (!peer || peer.destroyed) return;
+  hostConn = peer.connect(hostId, {reliable:true});
+  hostConn.on('open', () => {
+    peers[hostId] = hostConn;
+    hud.textContent = 'CONNECTED TO OUTPOST HOST';
+    hostConn.send({type:'join', name:playerName});
+  });
+  hostConn.on('data', data => handleP2PData(data, hostId));
+  hostConn.on('close', () => {
+    delete peers[hostId];
+    delete remotePlayers[hostId];
+    hud.textContent = 'HOST DISCONNECTED // RECONNECTING';
+    setTimeout(() => connectToHost(hostId), 1800);
+  });
+  hostConn.on('error', () => {
+    hud.textContent = 'P2P CONNECTION INTERRUPTED';
+  });
+}
+
+/* Host-and-spoke topology: clients send ONLY to the host.
+   The host relays packets without changing the original player identity. */
+function broadcastP2P(data) {
+  if (isHost) {
+    for (const id in peers) {
+      const conn = peers[id];
+      if (conn && conn.open) {
+        try { conn.send(data); } catch (_) {}
+      }
+    }
+  } else if (hostConn && hostConn.open) {
+    try { hostConn.send(data); } catch (_) {}
+  }
+}
+
+function handleP2PData(data, connectionId) {
+  if (!data || typeof data !== 'object') return;
+
+  if (data.type === 'player_update') {
+    const playerId = data.sender || connectionId;
+    // Never render our own relayed packet as a second player.
+    if (!playerId || playerId === myPeerId) return;
+    const st = data.state;
+    if (!st || !Number.isFinite(st.x) || !Number.isFinite(st.y)) return;
+
+    let rp = remotePlayers[playerId];
+    if (!rp) {
+      rp = remotePlayers[playerId] = {
+        currX:st.x, currY:st.y, snapshots:[], lastSeq:-1
+      };
+    }
+    if (Number.isFinite(data.seq) && data.seq <= rp.lastSeq) return;
+    if (Number.isFinite(data.seq)) rp.lastSeq = data.seq;
+
+    rp.snapshots.push({
+      x:st.x, y:st.y, time:performance.now()
+    });
+    if (rp.snapshots.length > 12) rp.snapshots.shift();
+    rp.dir = st.dir;
+    rp.animTimer = st.animTimer;
+    rp.suit = st.suit;
+    rp.visor = st.visor;
+    rp.name = st.name;
+    rp.pvp = st.pvp;
+    rp.lastSeen = performance.now();
+
+    if (isHost) broadcastP2P(data);
+  }
+  else if (data.type === 'build_mod') {
+    if (data.mod && !mods.some(m => m.id === data.mod.id)) mods.push(data.mod);
+    if (isHost) broadcastP2P(data);
+  }
+  else if (data.type === 'build_wire') {
+    if (data.wire && !wires.some(w => w.id === data.wire.id)) {
+      const nA = mods.find(m => m.id === data.wire.aId);
+      const nB = mods.find(m => m.id === data.wire.bId);
+      if (nA && nB) wires.push({...data.wire, a:nA, b:nB, p:0});
+    }
+    if (isHost) broadcastP2P(data);
+  }
+  else if (data.type === 'upgrade_mod') {
+    const m = mods.find(i => i.id === data.id);
+    if (m) m.lv = data.lv;
+    if (isHost) broadcastP2P(data);
+  }
+  else if (data.type === 'world_state') {
+    mods.length = 0;
+    wires.length = 0;
+    (data.mods || []).forEach(m => mods.push(m));
+    (data.wires || []).forEach(w => {
+      const nA = mods.find(m => m.id === w.aId);
+      const nB = mods.find(m => m.id === w.bId);
+      if (nA && nB) wires.push({...w, a:nA, b:nB, p:0});
+    });
+    ringTerraformed = !!data.ringTerraformed;
+    hasHQ = !!data.hasHQ;
+  }
+  else if (data.type === 'player_left') {
+    delete remotePlayers[data.id];
+  }
+  else if (data.type === 'join' && isHost) {
+    const conn = peers[connectionId];
+    if (conn && conn.open) conn.send(worldSnapshot());
+  }
+}
+
+// 20 Hz sequenced movement snapshots. The host relays the original sender ID.
+let movementSequence = 0;
+setInterval(() => {
+  if (!myPeerId) return;
+  broadcastP2P({
+    type:'player_update',
+    sender:myPeerId,
+    seq:++movementSequence,
+    sentAt:performance.now(),
+    state:{
+      name:playerName, suit:suitColor, visor:visorColor,
+      x:pl.x, y:pl.y, dir:pl.dir, animTimer:pl.animTimer,
+      inShip:pl.inShip, pvp:pvpEnabled
+    }
+  });
+}, 50);
+
+function update(dt){
+  bh+=.35*dt;
+  
+  if(Math.abs(pl.vx)>10 && !pl.inShip) {
+    pl.animTimer += dt * 14;
+  } else {
+    pl.animTimer = 0;
+  }
+
+  for(let s of stars){s.x=(s.x+s.v*dt)%4e3;s.y=(s.y+s.v*.2*dt)%4e3}
+
+  // Render remote players slightly behind real time, interpolating between
+  // timestamped snapshots. This absorbs jitter instead of chasing each packet.
+  const now = performance.now();
+  const renderTime = now - 110;
+  for (const pid in remotePlayers) {
+    const rp = remotePlayers[pid];
+    if (rp.lastSeen && now - rp.lastSeen > 6500) {
+      delete remotePlayers[pid];
+      continue;
+    }
+    const q = rp.snapshots || [];
+    while (q.length > 2 && q[1].time < renderTime - 250) q.shift();
+    if (q.length >= 2) {
+      let a=q[0], b=q[1];
+      if (renderTime >= b.time) {
+        a=q[q.length-2]; b=q[q.length-1];
+      }
+      const span=Math.max(1,b.time-a.time);
+      const t=Math.max(0,Math.min(1,(renderTime-a.time)/span));
+      const tx=a.x+(b.x-a.x)*t, ty=a.y+(b.y-a.y)*t;
+      // Small correction is smooth; large corrections are treated as a respawn/teleport.
+      if (Math.hypot(tx-rp.currX,ty-rp.currY)>900) {
+        rp.currX=tx; rp.currY=ty;
+      } else {
+        const blend=1-Math.exp(-dt*15);
+        rp.currX += (tx-rp.currX)*blend;
+        rp.currY += (ty-rp.currY)*blend;
+      }
+    } else if (q.length === 1) {
+      rp.currX=q[0].x; rp.currY=q[0].y;
+    }
+  }
+
+  let serverCount = mods.filter(m=>m.t=='server').length;
+  let serverBoost = 1 + (serverCount * 0.4);
+
+  let ants=mods.filter(m=>m.t=='ant');
+  for(let a of ants){
+    let y1=sY(a.x,a.b)-46-a.lv*8;
+    a.conns=ants.filter(o=>o!=a&&Math.hypot(a.x-o.x,y1-(sY(o.x,o.b)-46-o.lv*8))<=(a.r+o.r)*.9).slice(0,5);
+    a.links=a.conns.length;
+  }
+
+  for(let m of mods)m.act=false;
+  for(let w of wires){
+    if(w.a.t=='solar') w.b.act=true;
+    w.p=(w.p+dt*2.5)%1;
+    if(w.b.t=='lab'&&w.b.act){
+      let rate=(w.a.lv*w.b.lv)*serverBoost*(txJob?.file?.id=='over'?2:1);
+      money+=22*rate*dt;
+      research+=12*rate*dt;
+      if((w.b.p+=.1*dt)>=1){w.b.p-=1;parts++}
+    }
+  }
+
+  if(txJob){
+    txJob.prog+=txJob.speed*serverBoost*dt;
+    document.getElementById('tx-bar').style.width=Math.min(100,(txJob.prog/txJob.file.size)*100)+'%';
+    document.getElementById('tx-txt').textContent=`TRANSMITTING ${txJob.file.name}... ${Math.round((txJob.prog/txJob.file.size)*100)}% (${Math.round(txJob.speed*serverBoost)} MB/s)`;
+    if(txJob.prog>=txJob.file.size){
+      let id=txJob.file.id;
+      if(id=='scan')money+=450;
+      if(id=='flux')ants.forEach(a=>a.r*=1.5);
+      document.getElementById('tx-txt').textContent=`EXECUTED ${txJob.file.name}!`;
+      txJob=null;
+    }
+  }
+
+  if(!pl.inShip){
+    let bk=bAt(pl.y),b=B[bk];pl.b=bk;pl.vy+=b.g*dt;
+    pl.vx=(keys.KeyA||keys.ArrowLeft)?(pl.dir=-1,-260):(keys.KeyD||keys.ArrowRight)?(pl.dir=1,260):pl.vx*.8;
+    if((keys.KeyW||keys.ArrowUp)&&pl.jet>0){pl.vy-=(b.g+380)*dt;pl.jet=Math.max(0,pl.jet-28*dt)}
+    pl.x+=pl.vx*dt;pl.y+=pl.vy*dt;
+    
+    let baseFloor=sY(pl.x,bk)-18;
+    let floorMod=mods.find(m=>m.b==bk&&m.t=='floor'&&Math.abs(m.x-pl.x)<36);
+    if(floorMod) baseFloor = sY(pl.x,bk) - 18 + (floorMod.yOff||0);
+
+    if(pl.y>=baseFloor){pl.y=baseFloor;pl.vy=0;pl.jet=Math.min(100,pl.jet+55*dt)}
+  } else {
+    let b=B[bAt(rk.y)];rk.vy+=b.g*.55*dt;
+    if(keys.KeyA||keys.ArrowLeft)rk.a-=2.5*dt;
+    if(keys.KeyD||keys.ArrowRight)rk.a+=2.5*dt;
+    if((keys.KeyW||keys.ArrowUp)&&rk.fuel>0){
+      rk.vx+=Math.cos(rk.a)*750*dt;
+      rk.vy+=Math.sin(rk.a)*750*dt;
+      rk.fuel=Math.max(0,rk.fuel-6*dt);
+    }
+    rk.x+=rk.vx*dt;rk.y+=rk.vy*dt;
+    let pf=sY(rk.x,'planet')-42, mf=sY(rk.x,'moon')-42;
+    if(rk.y>=pf){rk.y=pf;rk.vy=0;rk.vx*=.85;rk.a=-Math.PI/2;rk.fuel=Math.min(100,rk.fuel+35*dt)}
+    pl.x=rk.x;pl.y=rk.y;pl.b=bAt(rk.y);
+  }
+}
+
+function drawMod(px,py,t,lv,gh,valid,act,pr){
+  x.save(); x.translate(px,py);
+  if(gh) x.globalAlpha=.62;
+  const edge=gh?(valid?'#34d399':'#fb7185'):'#67e8f9';
+  const shell=gh?(valid?'#064e3b':'#7f1d1d'):'#17283b';
+  x.lineJoin='round'; x.lineCap='round';
+  // Shared foundation, bolts and contact shadow.
+  if(!['floor','wall'].includes(t)){
+    x.fillStyle='rgba(0,0,0,.38)'; x.beginPath(); x.ellipse(0,2,39,7,0,0,Math.PI*2); x.fill();
+    x.fillStyle='#334155'; x.fillRect(-35,-8,70,9);
+    x.fillStyle=edge; x.fillRect(-35,-8,70,2);
+  }
+  if(t==='floor'){
+    x.fillStyle=shell; x.fillRect(-36,-9,72,14);
+    x.strokeStyle=edge; x.lineWidth=1.5; x.strokeRect(-36,-9,72,14);
+    for(let i=-24;i<=24;i+=16){x.fillStyle='#94a3b8';x.fillRect(i,-6,5,2)}
+  } else if(t==='wall'){
+    x.fillStyle=shell; x.fillRect(-11,-58,22,58);
+    x.fillStyle='#334155'; x.fillRect(-7,-54,14,50);
+    x.strokeStyle=edge; x.lineWidth=2; x.strokeRect(-11,-58,22,58);
+    for(let i=0;i<4;i++){x.fillStyle='#64748b';x.fillRect(-8,-48+i*13,16,3)}
+  } else if(t==='hq'){
+    x.fillStyle=shell; x.beginPath(); x.moveTo(-46,-8);x.lineTo(-40,-46);x.lineTo(0,-59);x.lineTo(40,-46);x.lineTo(46,-8);x.closePath();x.fill();
+    x.strokeStyle=edge;x.lineWidth=2;x.stroke();
+    x.fillStyle='#0b1220';x.fillRect(-30,-36,60,26);
+    x.strokeStyle='#38bdf8';x.strokeRect(-30,-36,60,26);
+    x.fillStyle='#7dd3fc';x.fillRect(-8,-31,16,17);
+    x.fillStyle='#cbd5e1';x.font='bold 8px monospace';x.textAlign='center';x.fillText('OUTPOST HQ',0,-43);
+    x.fillStyle='#fbbf24';x.fillRect(-37,-14,5,4);x.fillRect(32,-14,5,4);
+  } else if(t==='server'){
+    x.fillStyle='#0b1220';x.fillRect(-22,-48,44,40);
+    x.strokeStyle=edge;x.lineWidth=2;x.strokeRect(-22,-48,44,40);
+    for(let i=0;i<3;i++){
+      x.fillStyle='#263b50';x.fillRect(-16,-41+i*11,32,8);
+      x.fillStyle=act?'#34d399':'#64748b';x.fillRect(-12,-38+i*11,5,3);
+      x.fillStyle='#38bdf8';x.fillRect(0,-38+i*11,18,2);
+    }
+    x.fillStyle='#94a3b8';x.fillRect(-4,-55,8,7);
+  } else if(t==='solar'){
+    x.fillStyle='#64748b';x.fillRect(-3,-36,6,29);
+    for(const side of [-1,1]){
+      x.save();x.translate(side*23,-39);
+      x.fillStyle='#123b65';x.fillRect(-22,-9,44,18);
+      x.strokeStyle=edge;x.lineWidth=1.5;x.strokeRect(-22,-9,44,18);
+      x.strokeStyle='#38bdf8';x.lineWidth=.7;
+      for(let i=-14;i<=14;i+=9){x.beginPath();x.moveTo(i,-9);x.lineTo(i,9);x.stroke()}
+      x.beginPath();x.moveTo(-22,0);x.lineTo(22,0);x.stroke();
+      x.fillStyle='rgba(125,211,252,.25)';x.fillRect(-20,-7,40,4);
+      x.restore();
+    }
+  } else if(t==='lab'){
+    const h=38+lv*4;
+    x.fillStyle=shell;x.fillRect(-29,-h-8,58,h);
+    x.strokeStyle=act?'#c084fc':edge;x.lineWidth=2;x.strokeRect(-29,-h-8,58,h);
+    x.fillStyle='#0b1220';x.fillRect(-21,-h,42,h-5);
+    x.fillStyle=act?'#c084fc':'#64748b';x.fillRect(-17,-h+7,34,4);
+    x.fillStyle='#38bdf8';x.beginPath();x.arc(0,-h/2-3,8,0,Math.PI*2);x.fill();
+    x.fillStyle='#dbeafe';x.beginPath();x.arc(0,-h/2-3,3,0,Math.PI*2);x.fill();
+    x.fillStyle='#94a3b8';x.fillRect(-23,-13,7,5);x.fillRect(16,-13,7,5);
+  } else if(t==='pc'){
+    x.fillStyle=shell;x.fillRect(-23,-42,46,33);
+    x.strokeStyle=edge;x.lineWidth=2;x.strokeRect(-23,-42,46,33);
+    x.fillStyle='#071525';x.fillRect(-18,-37,36,23);
+    x.fillStyle=act?'#34d399':'#0ea5e9';x.fillRect(-14,-33,28,14);
+    x.fillStyle='#dbeafe';x.fillRect(-10,-29,9,2);
+    x.fillStyle='#64748b';x.fillRect(-12,-6,24,3);
+  } else if(t==='tele'){
+    x.fillStyle='#122b43';x.fillRect(-27,-17,54,10);
+    x.strokeStyle=edge;x.lineWidth=2;x.strokeRect(-27,-17,54,10);
+    x.strokeStyle='#7dd3fc';x.lineWidth=2;
+    x.beginPath();x.ellipse(0,-17,20,6,0,0,Math.PI*2);x.stroke();
+    x.fillStyle='rgba(56,189,248,.2)';x.fillRect(-20,-28,40,12);
+    x.fillStyle=edge;x.fillRect(-3,-25,6,5);
+  } else if(t==='ant'){
+    const h=44+lv*8;
+    x.strokeStyle='#94a3b8';x.lineWidth=4;x.beginPath();x.moveTo(-12,-8);x.lineTo(0,-h);x.lineTo(12,-8);x.stroke();
+    x.strokeStyle=edge;x.lineWidth=1.5;x.beginPath();x.moveTo(-8,-h*.55);x.lineTo(8,-h*.55);x.stroke();
+    x.fillStyle='#334155';x.fillRect(-5,-h-8,10,10);
+    x.save();x.translate(0,-h-5);x.rotate(Math.sin(performance.now()*.0006)*.18);
+    x.strokeStyle=edge;x.lineWidth=3;x.beginPath();x.ellipse(0,0,16,8,-.3,0,Math.PI*2);x.stroke();
+    x.beginPath();x.moveTo(0,0);x.lineTo(0,-17);x.stroke();x.restore();
+    if(showBeams&&!gh){
+      const pulse=(performance.now()*.05)%65;
+      x.strokeStyle=`rgba(56,189,248,${1-pulse/65})`;x.lineWidth=2;
+      x.beginPath();x.arc(0,-h-5,pulse,0,Math.PI*2);x.stroke();
+      x.fillStyle='#7dd3fc';x.beginPath();x.arc(0,-h-5,3,0,Math.PI*2);x.fill();
+    }
+  }
+  if(lv>1&&!gh){x.fillStyle='#fbbf24';x.font='9px monospace';x.textAlign='right';x.fillText('LV '+lv,30,-15)}
+  x.restore();
+}
+
+function drawPlayer(p, bodyColor='#38bdf8', visorCol='#00ffcc', label=null, pvp=false){
+  x.save();x.translate(p.x,p.y);x.scale(p.dir<0?-1:1,1);
+  const moving=!!p.animTimer, swing=moving?Math.sin(p.animTimer)*5:0;
+  // Ground shadow and small jet pack.
+  x.fillStyle='rgba(0,0,0,.35)';x.beginPath();x.ellipse(0,2,10,3,0,0,Math.PI*2);x.fill();
+  x.fillStyle='#475569';x.fillRect(-9,-14,4,13);
+  x.fillStyle='#94a3b8';x.fillRect(-10,-13,6,8);
+  // Legs with articulated boots.
+  x.strokeStyle='#94a3b8';x.lineWidth=4;x.lineCap='round';
+  x.beginPath();x.moveTo(-3,-5);x.lineTo(-4+swing,-1);x.lineTo(-5+swing,7);x.stroke();
+  x.beginPath();x.moveTo(3,-5);x.lineTo(4-swing,-1);x.lineTo(5-swing,7);x.stroke();
+  x.fillStyle='#1e293b';x.fillRect(-8,5+swing,6,4);x.fillRect(2,5-swing,6,4);
+  // Suit torso, shoulder plates and chest panel.
+  x.fillStyle=pvp?'#7f1d1d':bodyColor;x.beginPath();x.roundRect(-7,-19,14,17,4);x.fill();
+  x.strokeStyle='#cbd5e1';x.lineWidth=1;x.stroke();
+  x.fillStyle='#cbd5e1';x.fillRect(-10,-17,4,7);x.fillRect(6,-17,4,7);
+  x.fillStyle='#0f172a';x.fillRect(-4,-14,8,7);
+  x.fillStyle=visorCol;x.shadowColor=visorCol;x.shadowBlur=8;x.fillRect(-2,-12,4,3);x.shadowBlur=0;
+  // Helmet and reflective visor.
+  x.fillStyle='#cbd5e1';x.beginPath();x.arc(0,-24,8,0,Math.PI*2);x.fill();
+  x.fillStyle='#334155';x.beginPath();x.arc(0,-24,6.5,0,Math.PI*2);x.fill();
+  x.fillStyle=visorCol;x.shadowColor=visorCol;x.shadowBlur=7;
+  x.beginPath();x.roundRect(1,-27,5,6,2);x.fill();x.shadowBlur=0;
+  x.fillStyle='rgba(255,255,255,.55)';x.fillRect(2,-26,2,1);
+  if(label){
+    x.scale(p.dir<0?-1:1,1);
+    x.fillStyle='rgba(2,6,23,.8)';x.fillRect(-Math.max(22,label.length*2.8),-43,Math.max(44,label.length*5.6),12);
+    x.strokeStyle=pvp?'#ef4444':'#38bdf8';x.lineWidth=.7;x.strokeRect(-Math.max(22,label.length*2.8),-43,Math.max(44,label.length*5.6),12);
+    x.fillStyle='#e2e8f0';x.font='9px monospace';x.textAlign='center';x.fillText(label,0,-34);
+  }
+  x.restore();
+}
+
+function draw(){
+  // Deep-space gradient, distant nebula clouds and layered starfields.
+  const bg=x.createLinearGradient(0,0,0,H);
+  bg.addColorStop(0,'#02030b');bg.addColorStop(.55,'#071226');bg.addColorStop(1,'#030713');
+  x.fillStyle=bg;x.fillRect(0,0,W,H);
+  for(let i=0;i<5;i++){
+    const nx=((i*317-pl.x*.018+W*2)%(W+500))-180;
+    const ny=H*(.12+(i%3)*.19)-pl.y*.008;
+    const glow=x.createRadialGradient(nx,ny,8,nx,ny,180+i*18);
+    glow.addColorStop(0,['rgba(30,64,175,.16)','rgba(14,116,144,.13)','rgba(88,28,135,.13)'][i%3]);
+    glow.addColorStop(1,'rgba(3,7,18,0)');
+    x.fillStyle=glow;x.fillRect(nx-220,ny-220,440,440);
+  }
+  // Tiny distant planetary silhouettes add scale and depth.
+  for(let i=0;i<3;i++){
+    const px=((i*463-pl.x*.025+W*2)%(W+300))-100;
+    const py=H*(.18+i*.17)-pl.y*.012, r=12+i*8;
+    x.fillStyle='rgba(71,85,105,.2)';x.beginPath();x.arc(px,py,r,0,Math.PI*2);x.fill();
+    x.strokeStyle='rgba(125,211,252,.15)';x.lineWidth=1;x.beginPath();x.ellipse(px,py,r*1.8,r*.45,-.2,0,Math.PI*2);x.stroke();
+  }
+  for(let i=0;i<stars.length;i++){
+    const st=stars[i], sx=(st.x-pl.x*.05+4000)%W, sy=(st.y-pl.y*.03+4000)%H;
+    const tw=.55+.45*Math.sin(performance.now()*.0015+i);
+    x.fillStyle=`rgba(210,232,255,${.25+tw*.65})`;
+    x.fillRect(sx,sy,st.s,st.s);
+    if(st.s>1.8){x.strokeStyle=`rgba(125,211,252,${tw*.25})`;x.beginPath();x.moveTo(sx-3,sy);x.lineTo(sx+4,sy);x.moveTo(sx,sy-3);x.lineTo(sx,sy+4);x.stroke()}
+  }
+
+  x.save();x.translate(W/2-pl.x,H*.65-pl.y);
+
+  let sx=Math.floor((pl.x-W)/40)*40,ex=pl.x+W+40;
+  for(let k of['planet','moon']){
+    let b=B[k];x.beginPath();x.moveTo(sx,sY(sx,k));
+    for(let px=sx;px<=ex;px+=40)x.lineTo(px,sY(px,k));
+    x.lineTo(ex,b.y+450);x.lineTo(sx,b.y+450);x.closePath();
+    x.fillStyle=b.c;x.fill();x.strokeStyle=b.l;x.lineWidth=3;x.stroke();
+  }
+
+  for(let w of wires){
+    if (!w.a || !w.b) continue;
+    let x1=w.a.x, y1=sY(x1,w.a.b)-18+(w.a.yOff||0);
+    let x2=w.b.x, y2=sY(x2,w.b.b)-18+(w.b.yOff||0);
+    let midX=(x1+x2)/2, midY=Math.max(y1,y2)+28;
+    
+    x.strokeStyle='#071827';x.lineWidth=6;x.beginPath();x.moveTo(x1,y1);x.quadraticCurveTo(midX,midY,x2,y2);x.stroke();
+    x.strokeStyle='#25617b';x.lineWidth=3;x.beginPath();x.moveTo(x1,y1);x.quadraticCurveTo(midX,midY,x2,y2);x.stroke();
+    x.strokeStyle='rgba(125,211,252,.7)';x.lineWidth=1;x.beginPath();x.moveTo(x1,y1-1);x.quadraticCurveTo(midX,midY-1,x2,y2-1);x.stroke();
+    for(const [cx,cy] of [[x1,y1],[x2,y2]]){
+      x.fillStyle='#0f172a';x.beginPath();x.arc(cx,cy,5,0,Math.PI*2);x.fill();
+      x.strokeStyle='#67e8f9';x.lineWidth=1.5;x.beginPath();x.arc(cx,cy,4,0,Math.PI*2);x.stroke();
+    }
+    if(showBeams){
+      const t=w.p, px=(1-t)*(1-t)*x1+2*(1-t)*t*midX+t*t*x2;
+      const py=(1-t)*(1-t)*y1+2*(1-t)*t*midY+t*t*y2;
+      x.save();x.shadowColor='#38bdf8';x.shadowBlur=13;
+      x.fillStyle='#e0f2fe';x.beginPath();x.arc(px,py,3.5,0,Math.PI*2);x.fill();x.restore();
+    }
+  }
+
+  for(let m of mods) drawMod(m.x, sY(m.x,m.b)+(m.yOff||0), m.t, m.lv, false, true, m.act, m.p);
+
+  if(ghost){
+    let b=bAt(pl.y);
+    drawMod(mouseWorldX, sY(mouseWorldX,b)+(ghost.t=='floor'?-35:(ghost.t=='wall'?-60:0)), ghost.t, 1, true, true, false, 0);
+  }
+
+  // Draw smooth interpolated remote players
+  for (let pid in remotePlayers) {
+    let rp = remotePlayers[pid];
+    drawPlayer({ 
+      x: rp.currX, 
+      y: rp.currY, 
+      dir: rp.dir || 1, 
+      animTimer: rp.animTimer || 0 
+    }, rp.suit||'#f59e0b', rp.visor||'#fff', rp.name||pid.substring(0,4), rp.pvp);
+  }
+
+  drawPlayer(pl, suitColor, visorColor, playerName, pvpEnabled);
+
+  x.restore();
+
+  mx.fillStyle='#020614';mx.fillRect(0,0,240,120);
+  mx.fillStyle='#fff';mx.fillRect(120+pl.x*.01,92+(pl.y/3600)*70,4,4);
+
+  hud.innerHTML=`
+    ROOM: <strong>${currentRoomId}</strong> | 
+    ROLE: <strong>${isHost?'HOST':'CLIENT'}</strong> | 
+    $<strong>${Math.floor(money)}</strong> | 
+    ONLINE: <strong>${Object.keys(remotePlayers).length + 1}</strong>
+  `;
+}
+
+function loop(n){
+  let dt=Math.min(.05,(n-last)/1e3);last=n;
+  update(dt);draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
